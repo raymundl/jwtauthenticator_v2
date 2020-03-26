@@ -48,8 +48,8 @@ class JSONWebTokenLoginHandler(BaseHandler):
                 url=_url,
             ))
 
-        print('auth_header', auth_header_content, header_name)
-        print('auth_url', auth_url, self.request.host, _url)
+        self.log.info('auth_header', auth_header_content, header_name)
+        self.log.info('auth_url', auth_url, self.request.host, _url)
         if auth_header_content:
             token = auth_header_content
         elif auth_cookie_content:
