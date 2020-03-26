@@ -48,9 +48,9 @@ class JSONWebTokenLoginHandler(BaseHandler):
                 url=_url,
             ))
 
-        if bool(auth_header_content) + bool(auth_cookie_content) + bool(auth_param_content) > 1:
-            raise web.HTTPError(400)
-        elif auth_header_content:
+        print('auth_header', auth_header_content, header_name)
+        print('auth_url', auth_url, self.request.host, _url)
+        if auth_header_content:
             token = auth_header_content
         elif auth_cookie_content:
             token = auth_cookie_content
