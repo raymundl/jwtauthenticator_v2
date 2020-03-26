@@ -48,8 +48,6 @@ class JSONWebTokenLoginHandler(BaseHandler):
                 url=_url,
             ))
 
-        self.log.info('auth_header', auth_header_content, header_name)
-        self.log.info('auth_url', auth_url, self.request.host, _url)
         if auth_header_content:
             token = auth_header_content
         elif auth_cookie_content:
@@ -70,7 +68,7 @@ class JSONWebTokenLoginHandler(BaseHandler):
             return self.auth_failed(auth_url)
 
         username = self.retrieve_username(claims, username_claim_field, extract_username=extract_username)
-        user = await self.auth_to_user({'name': username})
+        user = await self.user_from_username(username)
         self.set_login_cookie(user)
 
         self.redirect(_url)
