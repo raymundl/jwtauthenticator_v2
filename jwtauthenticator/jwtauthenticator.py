@@ -2,7 +2,10 @@ from jupyterhub.handlers import BaseHandler
 from jupyterhub.auth import Authenticator
 from jupyterhub.auth import LocalAuthenticator
 from jupyterhub.utils import url_path_join
+import requests
+import json
 import jwt
+import os
 from tornado import (
     gen,
     web,
@@ -15,6 +18,8 @@ from traitlets import (
 
 
 class JSONWebTokenLoginHandler(BaseHandler):
+    JWKS_CACHE = '/tmp/_jwks.json'
+
     async def get(self):
         header_name = self.authenticator.header_name
         cookie_name = self.authenticator.cookie_name
@@ -26,6 +31,8 @@ class JSONWebTokenLoginHandler(BaseHandler):
 
         signing_certificate = self.authenticator.signing_certificate
         secret = self.authenticator.secret
+        jwks_url = self.authenticator.jwks_url
+        save_token = self.authenticator.save_token
         algorithms = self.authenticator.algorithms
 
         username_claim_field = self.authenticator.username_claim_field
@@ -58,7 +65,9 @@ class JSONWebTokenLoginHandler(BaseHandler):
             return self.auth_failed(auth_url)
 
         try:
-            if secret:
+            if jwks_url:
+                claims = self.verify_jwt_using_jwks_url(token, jwks_url, audience)
+            elif secret:
                 claims = self.verify_jwt_using_secret(token, secret, algorithms, audience)
             elif signing_certificate:
                 claims = self.verify_jwt_with_claims(token, signing_certificate, audience)
@@ -66,11 +75,21 @@ class JSONWebTokenLoginHandler(BaseHandler):
                 return self.auth_failed(auth_url)
         except jwt.exceptions.InvalidTokenError:
             return self.auth_failed(auth_url)
+        except Exception as e:
+            self.log.error('auth failed with: %s' % e)
+            return self.auth_failed(auth_url)
 
         username = self.retrieve_username(claims, username_claim_field, extract_username=extract_username)
-        user = await self.user_from_username(username)
+        if save_token:
+            user = await self.auth_to_user({
+                'name': username,
+                'auth_state': {
+                    save_token: token
+                }
+            })
+        else:
+            user = await self.user_from_username(username)
         self.set_login_cookie(user)
-
         self.redirect(_url)
 
     def auth_failed(self, redirect_url):
@@ -95,11 +114,36 @@ class JSONWebTokenLoginHandler(BaseHandler):
         return jwt.decode(json_web_token, secret, algorithms=algorithms, audience=audience, options=opts)
 
     @staticmethod
+    def verify_jwt_using_jwks_url(json_web_token, jwks_url, audience):
+        opts = {}
+        if not audience:
+            opts = {"verify_aud": False}
+        public_keys = {}
+        if os.path.exists(JSONWebTokenLoginHandler.JWKS_CACHE):
+            with open(JSONWebTokenLoginHandler.JWKS_CACHE) as fi:
+                jwks = json.load(fi)
+        else:
+            resp = requests.get(jwks_url)
+            jwks = resp.json()
+            with open(JSONWebTokenLoginHandler.JWKS_CACHE, 'w+') as fo:
+                json.dump(jwks, fo)
+        for jwk in jwks['keys']:
+            kid = jwk['kid']
+            public_keys[kid] = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(jwk))
+        kid = jwt.get_unverified_header(json_web_token)['kid']
+        return jwt.decode(json_web_token, key=public_keys[kid], algorithms=['RS256'], audience=audience, options=opts)
+
+    @staticmethod
     def retrieve_username(claims, username_claim_field, extract_username):
         username = claims[username_claim_field]
         if extract_username:
             if "@" in username:
-                return username.split("@")[0]
+                name, domain = username.split('@')
+                if domain.count('.') >= 2:  # company branch name if any
+                    subs = domain.split('.')
+                    username = '%s-%s' % (name, subs[0])
+                else:
+                    username = name
         return username
 
 
@@ -143,6 +187,14 @@ class JSONWebTokenAuthenticator(Authenticator):
         config=True,
         help="""Shared secret key for siging JWT token. If defined, it overrides any setting for signing_certificate""")
 
+    jwks_url = Unicode(
+        config=True,
+        help="""Shared JSON Web Key Set URL. If defined, it overrides any setting for signing_certificate""")
+
+    save_token = Unicode(
+        config=True,
+        help="""If not empty, save JWToken into auth_state and name it by this parameter""")
+
     algorithms = List(
         default_value=['HS256'],
         config=True,
@@ -179,6 +231,14 @@ class JSONWebTokenAuthenticator(Authenticator):
     @gen.coroutine
     def authenticate(self, *args):
         raise NotImplementedError()
+
+    @gen.coroutine
+    def pre_spawn_start(self, user, spawner):
+        """Pass upstream token to spawner via environment variable"""
+        auth_state = yield user.get_auth_state()
+        if auth_state and self.save_token:
+            self.log.info('pre_spawn_start with token: %s' % self.save_token)
+            spawner.environment[self.save_token.upper()] = auth_state[self.save_token]
 
 
 class JSONWebTokenLocalAuthenticator(JSONWebTokenAuthenticator, LocalAuthenticator):
